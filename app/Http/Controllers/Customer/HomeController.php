@@ -22,7 +22,7 @@ class HomeController extends Controller
             $products->where('name', 'like', '%' . $searchQuery . '%');
         }
 
-        $products = $products->latest()->take(12)->get();
+        $products = $products->latest()->paginate(12);
 
         return Inertia::render('Customer/Home', [
             'categories' => $categories,

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import CustomerLayout from '@/layouts/CustomerLayout.vue';
 import { Head, Link, router } from '@inertiajs/vue3';
-import { ref } from 'vue';
-import { Search } from 'lucide-vue-next';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { Search, Loader2 } from 'lucide-vue-next';
 
 interface Category {
     id: number;
@@ -20,26 +20,59 @@ interface Product {
     category: Category;
 }
 
+interface PaginatedProducts {
+    data: Product[];
+    current_page: number;
+    last_page: number;
+    per_page: number;
+    total: number;
+    next_page_url: string | null;
+}
+
 interface Props {
     categories: Category[];
-    featuredProducts: Product[];
+    featuredProducts: PaginatedProducts;
     searchQuery?: string;
 }
 
 const props = defineProps<Props>();
 
 const searchInput = ref(props.searchQuery || '');
+const products = ref<Product[]>([...props.featuredProducts.data]);
+const currentPage = ref(props.featuredProducts.current_page);
+const lastPage = ref(props.featuredProducts.last_page);
+const isLoading = ref(false);
+const loadMoreTrigger = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+const hasMore = computed(() => currentPage.value < lastPage.value);
 
 const performSearch = () => {
+    // Reset products when searching
+    products.value = [];
+    currentPage.value = 1;
+
     if (searchInput.value.trim()) {
         router.get('/', { search: searchInput.value.trim() }, {
-            preserveState: true,
-            preserveScroll: true,
+            preserveState: false,
+            preserveScroll: false,
+            onSuccess: (page) => {
+                const newProducts = (page.props.featuredProducts as PaginatedProducts);
+                products.value = [...newProducts.data];
+                currentPage.value = newProducts.current_page;
+                lastPage.value = newProducts.last_page;
+            },
         });
     } else {
         router.get('/', {}, {
-            preserveState: true,
-            preserveScroll: true,
+            preserveState: false,
+            preserveScroll: false,
+            onSuccess: (page) => {
+                const newProducts = (page.props.featuredProducts as PaginatedProducts);
+                products.value = [...newProducts.data];
+                currentPage.value = newProducts.current_page;
+                lastPage.value = newProducts.last_page;
+            },
         });
     }
 };
@@ -51,11 +84,102 @@ const handleSearchSubmit = (e: Event) => {
 
 const clearSearch = () => {
     searchInput.value = '';
+    products.value = [];
+    currentPage.value = 1;
     router.get('/', {}, {
-        preserveState: true,
-        preserveScroll: true,
+        preserveState: false,
+        preserveScroll: false,
+        onSuccess: (page) => {
+            const newProducts = (page.props.featuredProducts as PaginatedProducts);
+            products.value = [...newProducts.data];
+            currentPage.value = newProducts.current_page;
+            lastPage.value = newProducts.last_page;
+        },
     });
 };
+
+const loadMore = () => {
+    if (isLoading.value || !hasMore.value) return;
+
+    isLoading.value = true;
+    const nextPage = currentPage.value + 1;
+    const params: Record<string, any> = { page: nextPage };
+
+    if (searchInput.value.trim()) {
+        params.search = searchInput.value.trim();
+    }
+
+    router.get('/', params, {
+        preserveState: true,
+        preserveScroll: true,
+        only: ['featuredProducts'],
+        onSuccess: (page) => {
+            const newProducts = (page.props.featuredProducts as PaginatedProducts);
+            products.value = [...products.value, ...newProducts.data];
+            currentPage.value = newProducts.current_page;
+            lastPage.value = newProducts.last_page;
+            isLoading.value = false;
+        },
+        onError: () => {
+            isLoading.value = false;
+        },
+    });
+};
+
+const setupIntersectionObserver = () => {
+    if (observer) {
+        observer.disconnect();
+    }
+
+    if (!loadMoreTrigger.value || !hasMore.value) return;
+
+    observer = new IntersectionObserver(
+        (entries) => {
+            const entry = entries[0];
+            if (entry.isIntersecting && hasMore.value && !isLoading.value) {
+                loadMore();
+            }
+        },
+        {
+            rootMargin: '100px', // Start loading 100px before reaching the bottom
+        }
+    );
+
+    observer.observe(loadMoreTrigger.value);
+};
+
+onMounted(() => {
+    // Setup observer after component is mounted
+    setTimeout(() => {
+        setupIntersectionObserver();
+    }, 100);
+});
+
+onUnmounted(() => {
+    if (observer) {
+        observer.disconnect();
+    }
+});
+
+// Watch for changes in hasMore to setup/teardown observer
+watch(hasMore, (newVal) => {
+    if (newVal) {
+        setTimeout(() => {
+            setupIntersectionObserver();
+        }, 100);
+    } else if (observer) {
+        observer.disconnect();
+    }
+});
+
+// Watch for prop changes (when search changes from outside)
+watch(() => props.featuredProducts, (newProducts) => {
+    if (currentPage.value === 1) {
+        products.value = [...newProducts.data];
+        currentPage.value = newProducts.current_page;
+        lastPage.value = newProducts.last_page;
+    }
+}, { deep: true });
 </script>
 
 <template>
@@ -110,9 +234,9 @@ const clearSearch = () => {
             <!-- Featured Products / Search Results -->
             <div>
                 <h2 class="mb-3 text-lg font-semibold text-gray-900">
-                    {{ props.searchQuery ? `Search Results${featuredProducts.length > 0 ? ` (${featuredProducts.length})` : ''}` : 'Featured Products' }}
+                    {{ props.searchQuery ? `Search Results${products.length > 0 ? ` (${props.featuredProducts.total})` : ''}` : 'Featured Products' }}
                 </h2>
-                <div v-if="featuredProducts.length === 0 && props.searchQuery" class="py-8 text-center text-gray-600">
+                <div v-if="products.length === 0 && props.searchQuery" class="py-8 text-center text-gray-600">
                     <p>No products found for "{{ props.searchQuery }}".</p>
                     <button
                         @click="clearSearch"
@@ -123,7 +247,7 @@ const clearSearch = () => {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <Link
-                        v-for="product in featuredProducts"
+                        v-for="product in products"
                         :key="product.id"
                         :href="`/products/${product.slug}`"
                         class="rounded-lg border border-gray-200 bg-white p-3 hover:shadow-md transition-shadow cursor-pointer"
@@ -149,6 +273,19 @@ const clearSearch = () => {
                             ${{ product.price ? Number(product.price).toFixed(2) : '0.00' }} / {{ product.unit || '' }}
                         </p>
                     </Link>
+                </div>
+
+                <!-- Loading indicator and infinite scroll trigger -->
+                <div v-if="hasMore" ref="loadMoreTrigger" class="mt-6 flex justify-center py-4">
+                    <div v-if="isLoading" class="flex items-center gap-2 text-gray-600">
+                        <Loader2 class="h-5 w-5 animate-spin" />
+                        <span class="text-sm">Loading more products...</span>
+                    </div>
+                    <div v-else class="h-20"></div>
+                </div>
+
+                <div v-if="!hasMore && products.length > 0" class="mt-6 py-4 text-center text-sm text-gray-600">
+                    <p>No more products to load</p>
                 </div>
             </div>
         </div>
